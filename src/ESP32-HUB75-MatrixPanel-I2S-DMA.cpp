@@ -56,7 +56,7 @@ struct RingState
   volatile uint32_t frontLower;         // framebuffer the lower panel half is sent from (lags front by one sweep when lag is on)
   volatile uint32_t flips, waits, waitUs, waitMaxUs; // flips, draws that had to wait, total/longest wait
   uint32_t lastEntry;                   // cycle count at the previous row interrupt
-  struct LateEvent { uint32_t gapUs, pc; char task[9]; };
+  struct LateEvent { uint32_t gapUs, pc, ms; char task[9]; };
   LateEvent lateLog[8];                 // the last gaps over 1 ms: how long, where the CPU was when the interrupt finally ran, and in which task
   volatile uint32_t lateSeq;            // number of events recorded so far
   volatile uint32_t gapMax, late[4];    // longest time between two row interrupts (cycles); counts over 1, 2, 5 and 10 ms
@@ -232,6 +232,7 @@ void IRAM_ATTR ringEof(void *, uint32_t descIndex)
     RingState::LateEvent &e = R.lateLog[R.lateSeq & 7];
     e.gapUs = gap / mhz;
     e.pc = pc;
+    e.ms = (uint32_t)(esp_timer_get_time() / 1000);
     const char *name = pcTaskGetName(nullptr);
     for (int i = 0; i < 8; i++)
       e.task[i] = name ? name[i] : 0;
@@ -1228,7 +1229,7 @@ bool MatrixPanel_I2S_DMA::ringStart()
   return dma_bus.start_row_interrupt(ringEof, nullptr);
 }
 
-bool MatrixPanel_I2S_DMA::nextLateEvent(uint32_t &seen, uint32_t &gapUs, uint32_t &pc, char *task) const
+bool MatrixPanel_I2S_DMA::nextLateEvent(uint32_t &seen, uint32_t &gapUs, uint32_t &pc, char *task, uint32_t *ms) const
 {
   const RingState &R = g_ring;
   if (!ring_on || seen >= R.lateSeq)
@@ -1238,6 +1239,8 @@ bool MatrixPanel_I2S_DMA::nextLateEvent(uint32_t &seen, uint32_t &gapUs, uint32_
   const RingState::LateEvent &e = R.lateLog[seen & 7];
   gapUs = e.gapUs;
   pc = e.pc;
+  if (ms)
+    *ms = e.ms;
   memcpy(task, e.task, 9);
   ++seen;
   return true;
