@@ -14,6 +14,7 @@ The goal of this project is to **minimise the RAM the panel driver uses**, so an
 - **Seam fix.** A scanned panel updates its two halves a full sweep apart at the middle (rows 31 and 32 are scanned one sweep apart), so moving content shows the lower half ahead. At 7/8-bit the lower half now switches to each new frame one sweep after the upper half, so the update runs smoothly from top to bottom.
 - **Draw ownership.** `flipDMABuffer()` does not wait, but the first draw after a flip waits (at most about 14 ms, once per flip) until the driver stops reading that buffer. Drawing into a buffer that is still on screen can no longer show half-drawn frames.
 - `setRingMode(own, lag)` overrides the defaults; `getRingStats()` reports refill time, missed rows and flip/wait counters.
+- **Interrupt-gap diagnostics.** `getRingStats()` also reports the longest gap between two row interrupts and how many gaps exceeded 1, 2, 5 and 10 ms; `nextLateEvent()` returns the length, interrupted program counter and task of recent gaps over 1 ms, to find what holds interrupts off (resolve the address with `addr2line`). The ring has (`ring_rows` - 1) row times of slack (1.8 ms for 8 rows at 137 Hz): a longer gap shows as a flicker.
 
 ## Limits
 
