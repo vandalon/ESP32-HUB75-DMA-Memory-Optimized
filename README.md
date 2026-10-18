@@ -1,4 +1,4 @@
-# ESP32 HUB75 Ring DMA
+# ESP32-HUB75-DMA-Memory-Optimized
 
 A memory-minimising fork of [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA) (MIT, 3.0.14) for the **original ESP32**. It keeps the Adafruit GFX API and the upstream configuration; the upstream README is in `UPSTREAM_README.md`.
 

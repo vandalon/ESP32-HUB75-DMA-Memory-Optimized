@@ -1,11 +1,11 @@
 {
-    "name": "ESP32 HUB75 Ring DMA",
+    "name": "ESP32 HUB75 DMA Memory Optimized",
     "version": "3.0.14-ring.1",
     "description": "Memory-light fork of ESP32-HUB75-MatrixPanel-DMA: streams bit planes through a small ring from a compact 24-bit framebuffer (about 33 KiB for a 64x64 panel at 8-bit colour, double buffered) and removes the mid-panel scan seam.",
     "keywords": "hub75, esp32, esp32s2, esp32s3, display, dma, rgb matrix",
     "repository": {
         "type": "git",
-        "url": ""
+        "url": "https://github.com/vandalon/ESP32-HUB75-DMA-Memory-Optimized.git"
     },
     "authors": [
         {
