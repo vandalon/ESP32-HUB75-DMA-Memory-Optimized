@@ -1,6 +1,10 @@
 # ESP32 HUB75 Ring DMA
 
-A fork of [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA) (MIT, 3.0.14) for the **original ESP32**. It keeps the Adafruit GFX API and the upstream configuration; the upstream README is in `UPSTREAM_README.md`.
+A memory-minimising fork of [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA) (MIT, 3.0.14) for the **original ESP32**. It keeps the Adafruit GFX API and the upstream configuration; the upstream README is in `UPSTREAM_README.md`.
+
+## Goal: minimum memory
+
+The goal of this project is to **minimise the RAM the panel driver uses**, so an ESP32 has room left for Wi-Fi, TLS, JSON, web servers and your application. A 64x64 panel at 8-bit colour, double buffered, needs about **33 KiB** of buffers here, against about 128 KiB in the classic driver. Colour depth and double buffering are kept; the price is some CPU time and a few limits (see below). If you have plenty of RAM and want maximum drawing speed, the upstream driver is the better choice.
 
 ## What is different
 
