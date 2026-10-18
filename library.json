@@ -1,0 +1,47 @@
+{
+    "name": "ESP32 HUB75 Ring DMA",
+    "version": "3.0.14-ring.1",
+    "description": "Memory-light fork of ESP32-HUB75-MatrixPanel-DMA: streams bit planes through a small ring from a compact 24-bit framebuffer (about 33 KiB for a 64x64 panel at 8-bit colour, double buffered) and removes the mid-panel scan seam.",
+    "keywords": "hub75, esp32, esp32s2, esp32s3, display, dma, rgb matrix",
+    "repository": {
+        "type": "git",
+        "url": ""
+    },
+    "authors": [
+        {
+            "name": "MrCodetastic (upstream)",
+            "url": "https://github.com/mrcodetastic/"
+        },
+        {
+            "name": "Joris Vandalon (ring mode)"
+        }
+    ],
+    "frameworks": [
+        "arduino",
+        "espidf"
+    ],
+    "platforms": [
+        "espressif32"
+    ],
+    "headers": [
+        "ESP32-HUB75-MatrixPanel-I2S-DMA.h",
+        "ESP32-VirtualMatrixPanel-I2S-DMA.h"
+    ],
+    "examples": [
+        {
+            "name": "SimpleTestShapes",
+            "base": "examples/1_SimpleTestShapes",
+            "files": [
+                "1_SimpleTestShapes.ino"
+            ]
+        },
+        {
+            "name": "Plasma Pattern",
+            "base": "examples/2_PatternPlasma",
+            "files": [
+                "2_PatternPlasma.ino",
+                "README.md"
+            ]
+        }
+    ]
+}
