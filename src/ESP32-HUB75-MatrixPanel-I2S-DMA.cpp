@@ -1193,7 +1193,8 @@ void MatrixPanel_I2S_DMA::ringPrefill()
     ringFillRow(R, r);
   R.nextFill = R.n;
   // Default: the lower half switches one sweep after the upper half (no seam), and drawing waits for the buffer to be free.
-  R.lag = R.own = (R.depth >= 7);
+  R.lag = (R.depth >= 7);
+  R.own = R.lag;
 }
 
 bool MatrixPanel_I2S_DMA::ringStart()
