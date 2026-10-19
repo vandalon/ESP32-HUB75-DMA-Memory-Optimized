@@ -1017,10 +1017,12 @@ uint8_t MatrixPanel_I2S_DMA::applyGain(uint8_t brt)
   const uint8_t floor_ = oeFloor();
   if (brt == 0 || brt >= floor_) { g_gainLut = nullptr; return brt; }
   unsigned gain = brt * 256u / floor_;  // 8.8
-  // The gain stops at 1/8: below that the dimmest content (the night clock) would round to nothing, so the window narrows again
+  // The gain stops at 1/8: below that the dimmest content (the night clock) would round to nothing, so the window narrows again,
+  // but never below half the floor (4 clocks in the narrowest plane): at 1 or 2 clocks the plane weights drift and white turns yellow.
+  // The lowest brightness settings therefore all give the same dimming, except for the red night clock (m_deepDim): it needs the dimmest output.
   constexpr unsigned kMinGain = 32;
   uint8_t window = floor_;
-  if (gain < kMinGain) { gain = kMinGain; window = (uint8_t)(brt * 256u / kMinGain); }
+  if (gain < kMinGain) { gain = kMinGain; window = (uint8_t)(brt * 256u / kMinGain); if (!m_deepDim) window = std::max<uint8_t>(window, floor_ / 2u); }
   const int depth = m_cfg.getPixelColorDepthBits();
   const int shift = 12 - depth + 8;
   const unsigned max_val = (1u << depth) - 1;
@@ -1570,3 +1572,50 @@ void MatrixPanel_I2S_DMA::fillRectDMA(int16_t x, int16_t y, int16_t w, int16_t h
 }
 
 #endif // NO_FAST_FUNCTIONS
+
+// Readback uses the existing framebuffer, not an extra RGB shadow buffer.
+bool MatrixPanel_I2S_DMA::readDisplayRow(int16_t y, uint8_t *rgb)
+{
+  if (!initialized || !rgb || y < 0 || y >= height()) return false;
+  const int front = m_cfg.double_buff ? (back_buffer_id ^ 1) : 0;
+  const uint8_t depth = m_cfg.getPixelColorDepthBits();
+  if (depth > 8) return false;
+  auto channel = [&](uint8_t value) -> uint8_t {
+    if (!value) return 0;
+#if !defined(NO_CIE1931) && defined(LUT_NATIVE_BIT_DEPTH)
+    const uint8_t *lut = g_gainLut ? g_gainLut : cie_lut_for_depth(depth);
+    int lo = 0, hi = 255;
+    while (lo < hi) { const int mid = (lo + hi) / 2; if (lut[mid] < value) lo = mid + 1; else hi = mid; }
+    return lo;
+#else
+    return (uint16_t)value * 255 / ((1u << depth) - 1);
+#endif
+  };
+  for (int16_t x = 0; x < width(); ++x) {
+    int16_t xx = x, yy = y, w = 1, h = 1;
+    transform(xx, yy, w, h);
+    const bool bottom = yy >= ROWS_PER_FRAME;
+    if (bottom) yy -= ROWS_PER_FRAME;
+    uint8_t r = 0, g = 0, b = 0;
+#ifdef HUB75_RING_STREAM
+    if (ring_on) {
+      const uint8_t *q = g_ring.crow[front][yy] + xx * 6;
+      const uint32_t lo = ringLoad24(q), hi = ringLoad24(q + 3);
+      const unsigned half = bottom ? 3 : 0;
+      for (unsigned bit = 0; bit < depth; ++bit) {
+        const uint32_t lane = ((bit < 4 ? lo : hi) >> ((bit % 4) * 6 + half)) & 7;
+        r |= (lane & 1) << bit; g |= ((lane >> 1) & 1) << bit; b |= ((lane >> 2) & 1) << bit;
+      }
+    } else
+#endif
+    {
+      xx = ESP32_TX_FIFO_POSITION_ADJUST(xx);
+      for (unsigned bit = 0; bit < depth; ++bit) {
+        const uint16_t lane = frame_buffer[front].rowBits[yy]->data[bit * PIXELS_PER_ROW + xx] >> (bottom ? BITS_RGB2_OFFSET : 0);
+        r |= (lane & 1) << bit; g |= ((lane >> 1) & 1) << bit; b |= ((lane >> 2) & 1) << bit;
+      }
+    }
+    *rgb++ = channel(r); *rgb++ = channel(g); *rgb++ = channel(b);
+  }
+  return true;
+}

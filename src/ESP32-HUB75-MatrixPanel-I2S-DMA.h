@@ -525,6 +525,10 @@ public:
   bool begin(int r1, int g1 = G1_PIN_DEFAULT, int b1 = B1_PIN_DEFAULT, int r2 = R2_PIN_DEFAULT, int g2 = G2_PIN_DEFAULT, int b2 = B2_PIN_DEFAULT, int a = A_PIN_DEFAULT, int b = B_PIN_DEFAULT, int c = C_PIN_DEFAULT, int d = D_PIN_DEFAULT, int e = E_PIN_DEFAULT, int lat = LAT_PIN_DEFAULT, int oe = OE_PIN_DEFAULT, int clk = CLK_PIN_DEFAULT);
   bool begin(const HUB75_I2S_CFG &cfg);
 
+  // Read the last submitted frame (2-8 bit depth) in logical screen coordinates as RGB888.
+  // Call from the drawing task between frames; no allocation or display changes.
+  bool readDisplayRow(int16_t y, uint8_t *rgb);
+
   // Adafruit's BASIC DRAW API (565 colour format)
   virtual void drawPixel(int16_t x, int16_t y, uint16_t color); // overwrite adafruit implementation
   virtual void fillScreen(uint16_t color);                      // overwrite adafruit implementation
@@ -701,6 +705,8 @@ public:
    */
   /** brightness values below this are dimmed in the pixel values too, so a change below it needs a repaint */
   uint8_t brightnessFloor() const { return oeFloor(); }
+  /** true: the lowest brightness may narrow the output window below its safe width (night clock); takes effect on the next setBrightness8 */
+  void setDeepDim(bool on) { m_deepDim = on; }
 
   void setBrightness8(const uint8_t b)
   {
@@ -872,6 +878,7 @@ private:
   void setBrightnessOE(uint8_t brt, const int _buff_id = 0);
   uint8_t applyGain(uint8_t brt);  // sets or clears the pixel gain table, returns the brightness for the OE windows
   uint8_t oeFloor() const;
+  bool m_deepDim = false;
 
   /**
    * @brief - transforms coordinates according to orientation
