@@ -63,6 +63,7 @@ struct RingState
   volatile uint32_t own, lag;           // draw calls wait for the back buffer to be released; lower half lags one sweep
   volatile uint32_t pending;            // set by a flip, cleared once the drawing side has seen the back buffer released
   uint32_t nextFill;                    // next row to generate
+  uint32_t curRow;                      // row last reported sent; the chain has only n row groups, so the interrupt follows the absolute row itself
   volatile uint32_t filled, missed, maxCycles, calls;
   volatile uint64_t sumCycles;
 };
@@ -240,9 +241,19 @@ void IRAM_ATTR ringEof(void *, uint32_t descIndex)
     R.lateSeq = R.lateSeq + 1;
   }
   if (gap > 1000 * mhz) { R.late[0] = R.late[0] + 1; if (gap > 2000 * mhz) { R.late[1] = R.late[1] + 1; if (gap > 5000 * mhz) { R.late[2] = R.late[2] + 1; if (gap > 10000 * mhz) R.late[3] = R.late[3] + 1; } } }
-  const uint32_t cur = descIndex / R.descPerRow;
-  if (cur >= R.rows)
+  // The chain holds n row groups (one per slot) and loops, so the descriptor only gives the slot. The row is the next one after the
+  // previous interrupt whose slot matches; late by up to n-1 rows re-syncs, a whole lap (n rows) late cannot be told apart.
+  const uint32_t slot = descIndex / R.descPerRow;
+  if (slot >= R.n)
     return;
+  uint32_t k = slot + R.n - (R.curRow % R.n); // rows % n == 0, so slot == row % n
+  k %= R.n;
+  if (k == 0)
+    k = R.n;
+  uint32_t cur = R.curRow + k;
+  if (cur >= R.rows)
+    cur -= R.rows;
+  R.curRow = cur;
   uint32_t target = cur + R.n;
   if (target >= R.rows)
     target -= R.rows;
@@ -273,6 +284,73 @@ void IRAM_ATTR ringEof(void *, uint32_t descIndex)
   static uint8_t g_gainTable[256];
   static const uint8_t *g_gainLut = nullptr;
 
+  /* Bit planes up to the transition bit are each shown for one slot, the higher ones for twice as long as the one below (the descriptor
+   * chain). A value's light is the sum over its set bits, which is not monotonic in the value once the transition bit is above 0 (e.g.
+   * with 1: 3 shows 2 slots, 4 shows 1). The brightness tables are lifted so a higher input never shows less light than a lower one
+   * (same idea as adjust_lut_for_bcm in esphome-libs/esp-hub75). Values never decrease either: the screen readback searches the table. */
+  static unsigned bcmWeight(unsigned value, int depth, int transition)
+  {
+    unsigned weight = 0;
+    for (int bit = 0; bit < depth; bit++)
+      if (value & (1u << bit)) weight += bit <= transition ? 1u : 1u << (bit - transition - 1);
+    return weight;
+  }
+
+  static void bcmMonotonic(uint8_t *lut, int depth, int transition)
+  {
+    const unsigned max_val = (1u << depth) - 1;
+    unsigned prevValue = 0, prevWeight = 0;
+    for (int i = 0; i < 256; i++)
+    {
+      unsigned best = lut[i] > prevValue ? lut[i] : prevValue;
+      while (best < max_val && bcmWeight(best, depth, transition) < prevWeight) best++;
+      lut[i] = (uint8_t)best;
+      prevValue = best;
+      prevWeight = bcmWeight(best, depth, transition);
+    }
+  }
+
+  static uint8_t g_bcmTable[256];  // the full-brightness table with the correction above; valid once begin() has built it
+  static bool g_bcmReady = false;
+  static inline const uint8_t *baseLut(unsigned depth) { return g_bcmReady ? g_bcmTable : cie_lut_for_depth(depth); }
+
+#if !defined(HUB75_NO_DITHER) && !defined(NO_CIE1931) && defined(LUT_NATIVE_BIT_DEPTH)
+  #define HUB75_DITHER
+  /* Ordered dithering while the gain table is active: the table is also kept with 8 fractional bits (g_dt->frac), an 8x8 Bayer threshold
+   * from the physical x,y is added before the cut to whole output levels, and the result goes through g_dt->map (the bcmMonotonic
+   * correction applied to the identity), so a higher value never shows less light. Off (g_dither false) at full brightness and above 8 bit. */
+  struct DitherTables { uint16_t frac[256]; uint8_t map[256]; };
+  static DitherTables *g_dt = nullptr;  // allocated on first use: no static RAM while dithering is off
+  static int g_ditherMapKey = -1;  // depth * 16 + transition the map was built for
+  static unsigned g_ditherMax = 255;
+  static bool g_dither = false;
+  static const uint8_t kBayer8[64] = {
+     0, 32,  8, 40,  2, 34, 10, 42,
+    48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44,  4, 36, 14, 46,  6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22,
+     3, 35, 11, 43,  1, 33,  9, 41,
+    51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47,  7, 39, 13, 45,  5, 37,
+    63, 31, 55, 23, 61, 29, 53, 21};
+  static inline uint8_t ditherChannel(uint8_t c, unsigned thr)
+  {
+    unsigned n = (g_dt->frac[c] + thr) >> 8;
+    return g_dt->map[n > g_ditherMax ? g_ditherMax : n];
+  }
+  static inline unsigned ditherThr(unsigned x, unsigned y) { return kBayer8[((y & 7) << 3) | (x & 7)] * 4u + 2u; }
+  // A solid colour needs the per-pixel path only when one channel has a fractional part
+  static inline bool ditherFractional(uint8_t r, uint8_t g, uint8_t b) { return g_dither && ((g_dt->frac[r] | g_dt->frac[g] | g_dt->frac[b]) & 0xFF); }
+  #define DO_DITHER(X, Y)                                                                             \
+    if (g_dither) {                                                                                   \
+      const unsigned thr_ = ditherThr(X, Y);                                                          \
+      red_val = ditherChannel(red, thr_); green_val = ditherChannel(green, thr_); blue_val = ditherChannel(blue, thr_); \
+    }
+#else
+  #define DO_DITHER(X, Y)
+  static inline bool ditherFractional(uint8_t, uint8_t, uint8_t) { return false; }
+#endif
+
   /* LED Brightness Compensation */                                                               
 #ifndef NO_CIE1931                                                                                
   /* CIE 1931 correction with bit-depth-optimized LUTs*/                                            
@@ -281,7 +359,7 @@ void IRAM_ATTR ringEof(void *, uint32_t descIndex)
 
     // Optimized path: LUT maps 8-bit input (0-255) directly to target bit depth output
     #define DO_BRIGHTNESS_COMPENSATION()                                                              \
-      const uint8_t *lut_ = g_gainLut ? g_gainLut : cie_lut_for_depth(m_cfg.getPixelColorDepthBits()); \
+      const uint8_t *lut_ = g_gainLut ? g_gainLut : baseLut(m_cfg.getPixelColorDepthBits());          \
       auto red_val   = lut_[red];                                                                     \
       auto green_val = lut_[green];                                                                   \
       auto blue_val  = lut_[blue];                                                                    
@@ -451,6 +529,20 @@ bool MatrixPanel_I2S_DMA::setupDMA(const HUB75_I2S_CFG &_cfg)
 
 #endif
 
+#if !defined(NO_CIE1931) && defined(LUT_NATIVE_BIT_DEPTH)
+  // The transition bit is final now: correct the full-brightness table for the plane weights
+  g_bcmReady = false;
+  if (m_cfg.getPixelColorDepthBits() >= 7)
+  {
+    if (const uint8_t *base = cie_lut_for_depth(m_cfg.getPixelColorDepthBits()))
+    {
+      memcpy(g_bcmTable, base, sizeof(g_bcmTable));
+      bcmMonotonic(g_bcmTable, m_cfg.getPixelColorDepthBits(), lsbMsbTransitionBit);
+      g_bcmReady = true;
+    }
+  }
+#endif
+
   /***
    * Step 2:  Calculate the DMA descriptors required, which is used for memory allocation of the DMA linked list memory structure.
    *          This determines the number of passes required to shift out the colour bits in the framebuffer.
@@ -482,8 +574,13 @@ bool MatrixPanel_I2S_DMA::setupDMA(const HUB75_I2S_CFG &_cfg)
   //dma_descriptors_per_row = 1;
 
   // Allocate DMA descriptors 
-  int dma_descriptions_required = dma_descriptors_per_row * ROWS_PER_FRAME;
-  
+#ifdef HUB75_RING_STREAM
+  const int chainRows = ring_on ? slotRows : ROWS_PER_FRAME; // the ring chain has one row group per slot and loops over them
+#else
+  const int chainRows = ROWS_PER_FRAME;
+#endif
+  int dma_descriptions_required = dma_descriptors_per_row * chainRows;
+
   ESP_LOGV("I2S-DMA", "DMA descriptors per row: %d", dma_descriptors_per_row);  
   ESP_LOGV("I2S-DMA", "DMA descriptors required per buffer: %d", dma_descriptions_required);    
 
@@ -515,7 +612,7 @@ bool MatrixPanel_I2S_DMA::setupDMA(const HUB75_I2S_CFG &_cfg)
 	
 	int _dmadescriptor_count = 0; // for tracking
 	
-    for (int row = 0; row < ROWS_PER_FRAME; row++)
+    for (int row = 0; row < chainRows; row++)
     {
 	  //ESP_LOGV("I2S-DMA", ">>> Linking DMA descriptors for output row %d", row);    	
 	  const int slotIdx = row % slotRows; // the ring reuses its slots, every row of a frame links to the slot it is generated into
@@ -692,6 +789,7 @@ void IRAM_ATTR MatrixPanel_I2S_DMA::updateMatrixDMABuffer(uint16_t x_coord, uint
    * https://ledshield.wordpress.com/2012/11/13/led-brightness-to-your-eye-gamma-correction-no/
    */
   DO_BRIGHTNESS_COMPENSATION() 
+  DO_DITHER(x_coord, y_coord)
 
 #ifdef HUB75_RING_STREAM
   if (ring_on)
@@ -767,6 +865,14 @@ void MatrixPanel_I2S_DMA::updateMatrixDMABuffer(uint8_t red, uint8_t green, uint
 {
   if (!initialized)
     return;
+
+  if (ditherFractional(red, green, blue))  // a flat colour that needs the pattern: per pixel, black and exact levels stay on the fast path below
+  {
+    for (uint16_t y = 0; y < m_cfg.mx_height; y++)
+      for (uint16_t x = 0; x < PIXELS_PER_ROW; x++)
+        updateMatrixDMABuffer(x, y, red, green, blue);
+    return;
+  }
 
   /* https://ledshield.wordpress.com/2012/11/13/led-brightness-to-your-eye-gamma-correction-no/ */
   DO_BRIGHTNESS_COMPENSATION()  
@@ -1015,7 +1121,13 @@ uint8_t MatrixPanel_I2S_DMA::oeFloor() const
 uint8_t MatrixPanel_I2S_DMA::applyGain(uint8_t brt)
 {
   const uint8_t floor_ = oeFloor();
-  if (brt == 0 || brt >= floor_) { g_gainLut = nullptr; return brt; }
+  if (brt == 0 || brt >= floor_) {
+    g_gainLut = nullptr;
+#ifdef HUB75_DITHER
+    g_dither = false;
+#endif
+    return brt;
+  }
   unsigned gain = brt * 256u / floor_;  // 8.8
   // The gain stops at 1/8: below that the dimmest content (the night clock) would round to nothing, so the window narrows again,
   // but never below half the floor (4 clocks in the narrowest plane): at 1 or 2 clocks the plane weights drift and white turns yellow.
@@ -1030,7 +1142,24 @@ uint8_t MatrixPanel_I2S_DMA::applyGain(uint8_t brt)
     unsigned out = (lumConvTab_12bit[v] * gain + (1u << (shift - 1))) >> shift;
     g_gainTable[v] = out > max_val ? max_val : out;
   }
+  bcmMonotonic(g_gainTable, depth, lsbMsbTransitionBit);
   g_gainLut = g_gainTable;
+#ifdef HUB75_DITHER
+  if (m_dither && depth <= 8 && !g_dt) g_dt = (DitherTables *)heap_caps_malloc(sizeof(DitherTables), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  g_dither = m_dither && depth <= 8 && g_dt;
+  if (g_dither) {
+    for (int v = 0; v < 256; v++) {
+      const unsigned f = (lumConvTab_12bit[v] * gain) >> (12 - depth);  // 8.8 fixed point of the output level
+      g_dt->frac[v] = f > 0xFFFF ? 0xFFFF : f;
+    }
+    g_ditherMax = max_val;
+    if (g_ditherMapKey != depth * 16 + lsbMsbTransitionBit) {
+      for (unsigned i = 0; i < 256; i++) g_dt->map[i] = i > max_val ? max_val : i;
+      bcmMonotonic(g_dt->map, depth, lsbMsbTransitionBit);
+      g_ditherMapKey = depth * 16 + lsbMsbTransitionBit;
+    }
+  }
+#endif
   return window;
 }
 
@@ -1221,6 +1350,7 @@ void MatrixPanel_I2S_DMA::ringPrefill()
   for (uint32_t r = 0; r < R.n; r++)
     ringFillRow(R, r);
   R.nextFill = R.n;
+  R.curRow = R.rows - 1; // the first row interrupt reports row 0
   // Default: the lower half switches one sweep after the upper half (no seam), and drawing waits for the buffer to be free.
   R.lag = (R.depth >= 7);
   R.own = R.lag;
@@ -1375,6 +1505,13 @@ void MatrixPanel_I2S_DMA::hlineDMA(int16_t x_coord, int16_t y_coord, int16_t l, 
   // if (x_coord+l > PIXELS_PER_ROW)
   //    l = PIXELS_PER_ROW - x_coord + 1;     // reset width to end of row
 
+  if (ditherFractional(red, green, blue))
+  {
+    for (int16_t i = 0; i < l; i++)
+      updateMatrixDMABuffer(x_coord + i, y_coord, red, green, blue);
+    return;
+  }
+
   /* LED Brightness Compensation */
 DO_BRIGHTNESS_COMPENSATION() 
 
@@ -1470,6 +1607,13 @@ void MatrixPanel_I2S_DMA::vlineDMA(int16_t x_coord, int16_t y_coord, int16_t l, 
   l = ((y_coord + l) >= m_cfg.mx_height) ? (m_cfg.mx_height - y_coord) : l;
   // if (y_coord + l > m_cfg.mx_height)
   ///    l = m_cfg.mx_height - y_coord + 1;     // reset width to end of col
+
+  if (ditherFractional(red, green, blue))
+  {
+    for (int16_t i = 0; i < l; i++)
+      updateMatrixDMABuffer(x_coord, y_coord + i, red, green, blue);
+    return;
+  }
 
   DO_BRIGHTNESS_COMPENSATION() 
 
@@ -1580,17 +1724,26 @@ bool MatrixPanel_I2S_DMA::readDisplayRow(int16_t y, uint8_t *rgb)
   const int front = m_cfg.double_buff ? (back_buffer_id ^ 1) : 0;
   const uint8_t depth = m_cfg.getPixelColorDepthBits();
   if (depth > 8) return false;
+#if !defined(NO_CIE1931) && defined(LUT_NATIVE_BIT_DEPTH)
+  // The smallest input that shows at least this output value, for every output value: built once per row instead of a
+  // binary search for each of the three channels of each pixel
+  uint8_t inverse[256];
+  {
+    const uint8_t *lut = g_gainLut ? g_gainLut : baseLut(depth);
+    unsigned input = 0;
+    for (unsigned value = 0; value < 256; ++value)
+    {
+      while (input < 255 && lut[input] < value) ++input;
+      inverse[value] = (uint8_t)input;
+    }
+  }
+  auto channel = [&](uint8_t value) -> uint8_t { return value ? inverse[value] : 0; };
+#else
   auto channel = [&](uint8_t value) -> uint8_t {
     if (!value) return 0;
-#if !defined(NO_CIE1931) && defined(LUT_NATIVE_BIT_DEPTH)
-    const uint8_t *lut = g_gainLut ? g_gainLut : cie_lut_for_depth(depth);
-    int lo = 0, hi = 255;
-    while (lo < hi) { const int mid = (lo + hi) / 2; if (lut[mid] < value) lo = mid + 1; else hi = mid; }
-    return lo;
-#else
     return (uint16_t)value * 255 / ((1u << depth) - 1);
-#endif
   };
+#endif
   for (int16_t x = 0; x < width(); ++x) {
     int16_t xx = x, yy = y, w = 1, h = 1;
     transform(xx, yy, w, h);
